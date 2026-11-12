@@ -1,0 +1,12 @@
+# Claude: /etc/ntfy/server.yml на российском VPS. base-url должен совпадать с сервером в iOS-приложении символ в символ.
+base-url: "https://my-vpn-hetzner.duckdns.org"
+listen-http: "127.0.0.1:2586"
+behind-proxy: true
+
+# Claude: без этого уведомления на iOS приходят с задержкой до нескольких часов. ntfy.sh получает только ID сообщения и хеш топика, не текст.
+upstream-base-url: "https://ntfy.sh"
+
+auth-file: "/var/lib/ntfy/user.db"
+auth-default-access: "deny-all"
+
+cache-file: "/var/cache/ntfy/cache.db"

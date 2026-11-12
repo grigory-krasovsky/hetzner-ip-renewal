@@ -1,0 +1,55 @@
+#!/bin/bash
+# Claude: Переключает проброс каскада (firewalld forward-port) на новый IP сервера в Германии.
+# Вызывается ботом hetzner-ip-renewal по SSH через sudo: cascade-set-target <IPv4>.
+# Если правила уже указывают на этот IP, ничего не меняет — бот вызывает скрипт и при каждом своём запуске.
+set -euo pipefail
+set -f
+
+command -v conntrack >/dev/null || { echo "Не установлен conntrack: dnf install conntrack-tools" >&2; exit 3; }
+
+zone="$(firewall-cmd --get-default-zone)"
+new_ip="${1:-}"
+
+if ! [[ "$new_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo "Ожидается IPv4-адрес, получено: '$new_ip'" >&2
+    exit 2
+fi
+
+wanted=(
+    "port=36346:proto=udp:toport=36346:toaddr=$new_ip"
+    "port=2222:proto=tcp:toport=22:toaddr=$new_ip"
+)
+changed=0
+
+# Claude: без аргументов правит текущие правила, с --permanent — сохранённые
+sync_rules() {
+    local mode=("$@") rule
+    for rule in $(firewall-cmd "${mode[@]}" --zone="$zone" --list-forward-ports); do
+        case "$rule" in
+            "${wanted[0]}"|"${wanted[1]}") ;;
+            port=36346:proto=udp:*|port=2222:proto=tcp:*)
+                firewall-cmd -q "${mode[@]}" --zone="$zone" --remove-forward-port="$rule"
+                changed=1
+                ;;
+        esac
+    done
+    for rule in "${wanted[@]}"; do
+        if ! firewall-cmd -q "${mode[@]}" --zone="$zone" --query-forward-port="$rule"; then
+            firewall-cmd -q "${mode[@]}" --zone="$zone" --add-forward-port="$rule"
+            changed=1
+        fi
+    done
+}
+
+sync_rules
+sync_rules --permanent
+
+if (( changed )); then
+    # Claude: firewalld не трогает уже созданные трансляции адресов: телефон, который без перерыва шлёт пакеты
+    # с одного порта, без сброса так и ходил бы на старый IP
+    conntrack -D -p udp --orig-port-dst 36346 >/dev/null 2>&1 || true
+    conntrack -D -p tcp --orig-port-dst 2222 >/dev/null 2>&1 || true
+    echo "Каскад переключён на $new_ip"
+else
+    echo "Каскад уже указывает на $new_ip"
+fi

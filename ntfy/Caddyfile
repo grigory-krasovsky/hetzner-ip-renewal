@@ -1,0 +1,6 @@
+# Claude: /etc/caddy/Caddyfile на российском VPS: HTTPS с сертификатом Let's Encrypt перед ntfy
+my-vpn-hetzner.duckdns.org {
+	reverse_proxy 127.0.0.1:2586 {
+		flush_interval -1
+	}
+}

@@ -59,7 +59,7 @@ public class IpMonitor {
     public synchronized void check() {
         if (!started) {
             started = true;
-            ntfy.send(Priority.LOW, "Бот запущен", "Проверяю сервер каждые %d мин. Команды: статус, сменить, пауза, продолжить."
+            ntfy.send(Priority.DEFAULT, "Бот запущен", "Проверяю сервер каждые %d мин. Команды: статус, сменить, пауза, продолжить."
                     .formatted(properties.checkInterval().toMinutes()));
         }
         if (paused) {
@@ -108,7 +108,7 @@ public class IpMonitor {
         if (!paused) {
             check();
         }
-        ntfy.send(Priority.LOW, "Статус", statusText(), Command.ROTATE, paused ? Command.RESUME : Command.PAUSE);
+        ntfy.send(Priority.DEFAULT, "Статус", statusText(), Command.ROTATE, paused ? Command.RESUME : Command.PAUSE);
     }
 
     public synchronized void rotateNow() {

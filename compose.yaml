@@ -1,0 +1,16 @@
+# Claude: запуск из корня проекта в PowerShell: docker compose up -d --build. Пути — для Docker Desktop на Windows.
+services:
+  hetzner-ip-renewal:
+    build: .
+    container_name: hetzner-ip-renewal
+    # Claude: контейнер поднимается сам при каждом запуске Docker Desktop, пока его не остановят вручную
+    restart: unless-stopped
+    # Claude: секреты вне репозитория: bot.env, ключ каскада cascade_bot и known_hosts
+    env_file: C:/hetzner-bot/bot.env
+    volumes:
+      - C:/hetzner-bot:/secrets:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

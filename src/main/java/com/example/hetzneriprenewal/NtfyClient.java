@@ -122,6 +122,7 @@ public class NtfyClient {
 
     public enum Priority {
 
+        // Claude: iOS показывает LOW без баннера и звука — сообщение видно только в приложении и Центре уведомлений
         LOW(2),
         DEFAULT(3),
         HIGH(4),

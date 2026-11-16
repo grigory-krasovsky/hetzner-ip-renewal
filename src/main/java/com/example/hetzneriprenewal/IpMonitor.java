@@ -1,8 +1,7 @@
 package com.example.hetzneriprenewal;
 
+import com.example.hetzneriprenewal.HetznerService.ServerInfo;
 import com.example.hetzneriprenewal.NtfyClient.Priority;
-import io.github.sinuscosinustan.hetznercloud.objects.general.PublicNet;
-import io.github.sinuscosinustan.hetznercloud.objects.general.Server;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -44,6 +43,8 @@ public class IpMonitor {
     private boolean outageAlerted;
     private boolean cascadeBroken;
     private String lastRotation;
+    // Claude: смена IP не удалась — сервер мог остаться выключенным, и его нужно включить
+    private boolean powerOnPending;
 
     public IpMonitor(HetznerService hetzner, CascadeClient cascade, DuckDnsClient duckDns, NtfyClient ntfy,
                      RenewalProperties properties) {
@@ -140,35 +141,54 @@ public class IpMonitor {
     }
 
     private String currentIp() {
-        Server server;
+        ServerInfo server;
         try {
             server = hetzner.getServer();
         } catch (RuntimeException e) {
             log.warn("Hetzner API недоступен: {}", e.getMessage());
             return null;
         }
-        boolean running = "running".equals(server.getStatus());
+        if (powerOnPending && "off".equals(server.status())) {
+            server = powerOnAfterFailedRotation(server);
+        }
+        boolean running = server.running();
+        if (running) {
+            powerOnPending = false;
+        }
         boolean changed = serverRunning == null ? !running : serverRunning != running;
         serverRunning = running;
         if (changed && running) {
             log.info("Сервер снова работает");
             ntfy.send(Priority.DEFAULT, "Сервер работает", "Сервер снова запущен, проверки возобновлены.");
         } else if (changed) {
-            log.warn("Сервер в статусе {}", server.getStatus());
-            ntfy.send(Priority.HIGH, "Сервер не работает",
-                    "Статус сервера в Hetzner: %s. Пока он не запущен, IP не проверяется и не меняется."
-                            .formatted(server.getStatus()));
+            log.warn("Сервер в статусе {}", server.status());
+            ntfy.send(Priority.HIGH, "Сервер не работает", powerOnPending
+                    ? "Сервер выключен после неудачной смены IP, включить его не удалось. Пробую при каждой проверке, "
+                            + "можно включить и в консоли Hetzner."
+                    : "Статус сервера в Hetzner: %s. Пока он не запущен, IP не проверяется и не меняется."
+                            .formatted(server.status()));
         }
         if (!running) {
             return null;
         }
-        PublicNet.IPv4 ipv4 = server.getPublicNet().getIpv4();
-        if (ipv4 == null) {
+        if (server.ipv4() == null) {
             log.error("У сервера нет основного IPv4 — привяжите IP вручную в консоли Hetzner");
             return null;
         }
-        serverIp = ipv4.getIp();
+        serverIp = server.ipv4();
         return serverIp;
+    }
+
+    private ServerInfo powerOnAfterFailedRotation(ServerInfo server) {
+        log.warn("Сервер выключен после неудачной смены IP — включаю");
+        try {
+            hetzner.powerOn();
+            ntfy.send(Priority.HIGH, "Сервер включён", "Сервер оставался выключенным после неудачной смены IP — включил его.");
+            return hetzner.getServer();
+        } catch (RuntimeException e) {
+            log.error("Не удалось включить сервер", e);
+            return server;
+        }
     }
 
     private void rotate(String oldIp, String reason) {
@@ -179,9 +199,10 @@ public class IpMonitor {
             newIp = hetzner.rotateIp();
         } catch (RuntimeException e) {
             log.error("Не удалось сменить IP", e);
+            powerOnPending = true;
             lastRotation = "%s, не удалась: %s".formatted(TIME.format(Instant.now()), e.getMessage());
             ntfy.send(Priority.URGENT, "Не удалось сменить IP",
-                    "%s\nСнова попробую сам, если IP будет недоступен %d мин."
+                    "%s\nЕсли сервер остался выключенным, включу его при следующей проверке. Сменить IP снова попробую сам, если он будет недоступен %d мин."
                             .formatted(e.getMessage(), properties.outageThreshold().toMinutes()),
                     Command.ROTATE, Command.STATUS);
             return;

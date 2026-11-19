@@ -28,6 +28,9 @@ public class NtfyClient {
     private static final Logger log = LoggerFactory.getLogger(NtfyClient.class);
 
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
+    /* Claude: ntfy по умолчанию принимает сообщение до 4 КБ, а длинное отклоняет целиком (HTTP 413) — уведомление
+       теряется. 1500 символов кириллицы — около 3 КБ в UTF-8. */
+    private static final int MAX_MESSAGE_LENGTH = 1500;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
@@ -47,7 +50,7 @@ public class NtfyClient {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("topic", properties.alertsTopic());
         body.put("title", title);
-        body.put("message", message);
+        body.put("message", message.length() <= MAX_MESSAGE_LENGTH ? message : message.substring(0, MAX_MESSAGE_LENGTH) + "…");
         body.put("priority", priority.value);
         if (buttons.length > 0) {
             body.put("actions", Arrays.stream(buttons).map(this::action).toList());

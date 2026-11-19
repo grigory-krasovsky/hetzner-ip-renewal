@@ -13,6 +13,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
@@ -30,38 +32,44 @@ public class HetznerService {
     private static final DateTimeFormatter IP_NAME_SUFFIX = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
 
     private final HetznerApi api;
+    private final BlockedIps blockedIps;
     private final long serverId;
     private final Duration shutdownTimeout;
+    private final int maxIpAttempts;
 
-    public HetznerService(HetznerApi api, HetznerProperties hetzner, RenewalProperties renewal) {
+    public HetznerService(HetznerApi api, BlockedIps blockedIps, HetznerProperties hetzner, RenewalProperties renewal) {
         this.api = api;
+        this.blockedIps = blockedIps;
         this.serverId = hetzner.serverId();
         this.shutdownTimeout = renewal.shutdownTimeout();
+        this.maxIpAttempts = renewal.maxIpAttempts();
     }
 
     public ServerInfo getServer() {
         return ServerInfo.from(api.get("servers/" + serverId).path("server"));
     }
 
-    /* Claude: Меняет основной IPv4 сервера и возвращает новый адрес. Новый IP создаётся сразу привязанным
-       к выключенному серверу, как при смене вручную. Каждый шаг ждёт завершения действия Hetzner и проверяет
-       состояние сервера или IP: ответ на запрос может потеряться в сети. */
-    public String rotateIp() {
+    /* Claude: Меняет основной IPv4 сервера. Новый IP создаётся сразу привязанным к выключенному серверу, как при
+       смене вручную. Старый IP попадает в список заблокированных: удалённый IP Hetzner возвращает в пул и может
+       выдать снова. Каждый шаг ждёт завершения действия Hetzner и проверяет состояние сервера или IP: ответ
+       на запрос может потеряться в сети. */
+    public Rotation rotateIp() {
         ServerInfo server = getServer();
         if (server.ipv4Id() == null) {
             throw new IllegalStateException("У сервера нет основного IPv4");
         }
         long oldIpId = server.ipv4Id();
         String oldIp = server.ipv4();
+        blockedIps.add(oldIp);
         boolean autoDelete = api.get("primary_ips/" + oldIpId).path("primary_ip").path("auto_delete").asBoolean();
 
-        String newIp;
+        Rotation rotation;
         try {
             powerOff();
             log.info("Отвязываю старый IP {}", oldIp);
             require("Отвязка старого IP", () -> !isAssigned(oldIpId),
                     () -> api.post("primary_ips/%d/actions/unassign".formatted(oldIpId), null));
-            newIp = createAssignedIp(server.name(), autoDelete, oldIpId, oldIp);
+            rotation = createFreshIp(server.name(), autoDelete, oldIpId, oldIp);
         } catch (RuntimeException e) {
             try {
                 powerOn();
@@ -74,9 +82,9 @@ public class HetznerService {
         try {
             powerOn();
         } catch (RuntimeException e) {
-            throw new IllegalStateException("IP сменён на %s, но сервер не включился: %s".formatted(newIp, e.getMessage()), e);
+            throw new IllegalStateException("IP сменён на %s, но сервер не включился: %s".formatted(rotation.ip(), e.getMessage()), e);
         }
-        return newIp;
+        return rotation;
     }
 
     public void powerOn() {
@@ -96,16 +104,35 @@ public class HetznerService {
                 () -> api.post("servers/%d/actions/poweroff".formatted(serverId), null));
     }
 
-    private String createAssignedIp(String serverName, boolean autoDelete, long oldIpId, String oldIp) {
-        String name = serverName + "-ipv4-" + LocalDateTime.now().format(IP_NAME_SUFFIX);
+    /* Claude: Создаёт привязанный IP, пока Hetzner не выдаст такой, которого нет в списке заблокированных.
+       Отклонённый IP отвязывается, но не удаляется до конца смены: иначе Hetzner сразу выдал бы его снова.
+       В конце, удачном или нет, отклонённые IP удаляются. */
+    private Rotation createFreshIp(String serverName, boolean autoDelete, long oldIpId, String oldIp) {
+        String baseName = serverName + "-ipv4-" + LocalDateTime.now().format(IP_NAME_SUFFIX);
+        List<PrimaryIp> rejected = new ArrayList<>();
         try {
-            JsonNode created = create(name, autoDelete);
-            long id = created.path("id").asLong();
-            String ip = created.path("ip").asText();
-            // Claude: привязывает IP само создание, здесь только проверка
-            require("Привязка нового IP", () -> Objects.equals(getServer().ipv4Id(), id), MissingNode::getInstance);
-            log.info("Создан и привязан новый IP {}", ip);
-            return ip;
+            for (int attempt = 1; ; attempt++) {
+                // Claude: имя IP уникально в проекте, а попытки могут уложиться в одну секунду
+                String name = attempt == 1 ? baseName : baseName + "-" + attempt;
+                JsonNode created = create(name, autoDelete);
+                long id = created.path("id").asLong();
+                String ip = created.path("ip").asText();
+                // Claude: привязывает IP само создание, здесь только проверка
+                require("Привязка нового IP", () -> Objects.equals(getServer().ipv4Id(), id), MissingNode::getInstance);
+                if (!blockedIps.contains(ip)) {
+                    log.info("Создан и привязан новый IP {}", ip);
+                    return new Rotation(ip, rejected.stream().map(PrimaryIp::ip).toList());
+                }
+                log.warn("Hetzner выдал IP {}, от которого бот уже уходил, — отвязываю и прошу другой", ip);
+                require("Отвязка заблокированного IP " + ip, () -> !isAssigned(id),
+                        () -> api.post("primary_ips/%d/actions/unassign".formatted(id), null));
+                // Claude: в список только после отвязки — привязанный IP удалился бы вместе с привязкой, и сервер остался бы без IP
+                rejected.add(new PrimaryIp(id, ip));
+                if (attempt >= maxIpAttempts) {
+                    throw new IllegalStateException("Hetzner %d раз подряд выдал IP, от которых бот уже уходил: %s"
+                            .formatted(attempt, String.join(", ", rejected.stream().map(PrimaryIp::ip).toList())));
+                }
+            }
         } catch (RuntimeException e) {
             log.error("Не удалось создать и привязать новый IP ({}), привязываю обратно старый {}", e.getMessage(), oldIp);
             try {
@@ -116,6 +143,8 @@ public class HetznerService {
                 e.addSuppressed(assignError);
             }
             throw e;
+        } finally {
+            rejected.forEach(ip -> deleteIp(ip.id(), ip.ip()));
         }
     }
 
@@ -155,11 +184,11 @@ public class HetznerService {
             // Claude: not_found — повтор запроса после потерянного ответа: IP уже удалён первой попыткой
             boolean alreadyDeleted = e instanceof HetznerApi.ApiException apiError && "not_found".equals(apiError.code());
             if (!alreadyDeleted) {
-                log.error("Не удалось удалить старый IP {} — удалите его вручную в консоли Hetzner", ip, e);
+                log.error("Не удалось удалить IP {} — удалите его вручную в консоли Hetzner", ip, e);
                 return;
             }
         }
-        log.info("Старый IP {} удалён", ip);
+        log.info("IP {} удалён", ip);
     }
 
     private boolean isOff() {
@@ -236,6 +265,15 @@ public class HetznerService {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Ожидание ответа Hetzner прервано", e);
         }
+    }
+
+    // Claude: rejectedIps — IP, которые Hetzner выдал во время смены, но они уже были заблокированы
+    public record Rotation(String ip, List<String> rejectedIps) {
+
+    }
+
+    private record PrimaryIp(long id, String ip) {
+
     }
 
     public record ServerInfo(String name, String status, Long ipv4Id, String ipv4) {

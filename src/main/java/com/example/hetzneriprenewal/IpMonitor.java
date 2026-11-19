@@ -1,5 +1,6 @@
 package com.example.hetzneriprenewal;
 
+import com.example.hetzneriprenewal.HetznerService.Rotation;
 import com.example.hetzneriprenewal.HetznerService.ServerInfo;
 import com.example.hetzneriprenewal.NtfyClient.Priority;
 import org.slf4j.Logger;
@@ -194,9 +195,9 @@ public class IpMonitor {
     private void rotate(String oldIp, String reason) {
         log.warn("{} — меняю IP", reason);
         ntfy.send(Priority.HIGH, "Меняю IP", reason + ". Сервер будет недоступен несколько минут.");
-        String newIp;
+        Rotation rotation;
         try {
-            newIp = hetzner.rotateIp();
+            rotation = hetzner.rotateIp();
         } catch (RuntimeException e) {
             log.error("Не удалось сменить IP", e);
             powerOnPending = true;
@@ -207,13 +208,16 @@ public class IpMonitor {
                     Command.ROTATE, Command.STATUS);
             return;
         }
+        String newIp = rotation.ip();
         log.info("IP сервера сменён: {} → {}", oldIp, newIp);
         serverIp = newIp;
         lastRotation = "%s, %s → %s".formatted(TIME.format(Instant.now()), oldIp, newIp);
         cascadeTarget.sync(newIp);
         dnsTarget.sync(newIp);
-        ntfy.send(Priority.HIGH, "IP сменён", "%s → %s\nКаскад: %s\nDuckDNS: %s"
-                .formatted(oldIp, newIp, cascadeState(newIp), dnsTarget.pointsTo(newIp) ? "обновлён" : "не обновлён"));
+        String rejected = rotation.rejectedIps().isEmpty() ? ""
+                : "\nHetzner выдавал уже заблокированные IP, их не взял: " + String.join(", ", rotation.rejectedIps());
+        ntfy.send(Priority.HIGH, "IP сменён", "%s → %s\nКаскад: %s\nDuckDNS: %s%s"
+                .formatted(oldIp, newIp, cascadeState(newIp), dnsTarget.pointsTo(newIp) ? "обновлён" : "не обновлён", rejected));
     }
 
     // Claude: на смену IP не влияет: если сервер доступен напрямую, а через каскад нет, сломан проброс на VPS

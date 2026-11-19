@@ -9,6 +9,8 @@ services:
     env_file: C:/hetzner-bot/bot.env
     volumes:
       - C:/hetzner-bot:/secrets:ro
+      # Claude: список заблокированных IP (blocked-ips.txt) — бот пишет его сам, каталог Docker создаст при запуске
+      - C:/hetzner-bot/state:/state
     logging:
       driver: json-file
       options:

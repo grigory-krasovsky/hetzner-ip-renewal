@@ -11,7 +11,10 @@ public record RenewalProperties(
         Duration outageThreshold,
         int probePort,
         Duration probeTimeout,
-        Duration shutdownTimeout
+        Duration shutdownTimeout,
+        String blockedIpsFile,
+        Duration blockedIpRetention,
+        int maxIpAttempts
 ) {
 
 }
